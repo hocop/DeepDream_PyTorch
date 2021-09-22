@@ -5,9 +5,10 @@ import numpy as np
 import cv2
 from torchvision import models
 from PIL import Image, ImageFont, ImageDraw 
+import sys
 
 # Overwrite these values before launching script
-SAVE_PATH = 'dream.avi'
+SAVE_PATH = sys.argv[1] if len(sys.argv) > 1 else 'dream.avi'
 
 FPS = 24
 
@@ -52,15 +53,6 @@ model.requires_grad_ = False
 model.to(DEVICE)
 model.eval()
 
-# Register forward hooks
-layer_id = 34
-#model.features[layer_id].register_forward_hook(hook)
-#for i in range(layer_id + 1, len(model.features)):
-#    model.features[i] = nn.Identity()
-#model.classifier = nn.Identity()
-
-model.classifier.register_forward_hook(hook)
-
 out_video = cv2.VideoWriter(SAVE_PATH, cv2.VideoWriter_fourcc('M','J','P','G'), FPS, (W, H))
 
 running_average = None
@@ -74,15 +66,11 @@ while True:
     # Make forward pass
     out = model(img_small)
 
-    # Get features
-    feats = hook_out['feats']
-
     # Compute loss
-#    neuron_id = (epoch // (FPS * 15)) % feats.shape[1]
     if epoch % (FPS * 15) == 0:
-        neuron_1 = np.random.randint(feats.shape[1])
-        neuron_2 = np.random.randint(feats.shape[1])
-    loss = torch.mean(feats[0, neuron_1]) + torch.mean(feats[0, neuron_2])
+        neuron_1 = np.random.randint(out.shape[1])
+        neuron_2 = np.random.randint(out.shape[1])
+    loss = torch.mean(out[0, neuron_1]) + torch.mean(out[0, neuron_2])
 
     # Compute gradients
     loss.backward()
