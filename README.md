@@ -6,7 +6,7 @@ Example frame:
 
 ![](example.png)
 
-Example of a recorded video: https://www.youtube.com/watch?v=GqWsaQc0SL
+Example of a recorded video: https://www.youtube.com/watch?v=GqWsaQc0SL0
 
 ## To record a video
 Run:
