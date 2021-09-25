@@ -11,30 +11,30 @@ import sys
 SAVE_PATH = sys.argv[1] if len(sys.argv) > 1 else 'dream.avi'
 
 FPS = 24
+CHANGING_PERIOD = 20
 
 # Read labels
-FONT_SIZE = 20
 exec(f'labels = {open("labels.txt").read()}')
+FONT_SIZE = 30
 font = ImageFont.truetype("arial.ttf", FONT_SIZE)
 
 
 # Accelerate calculations
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Number of iterations & learning rate
-NUM_EPOCHS = 500
-LR = 0.03
+# Learning rate
+LR = 0.04
 
 # Result picture dimensions
-H = 720
-W = 1280
+H = 1080
+W = 1920
 
 CAM_MATRIX = np.array([
     [1000, 0.0, W / 2],
     [0.0, 1000, H / 2],
     [0.0, 0.0,    1.0]
 ])
-DISTORTION = np.array([0.001, 0.02, 0.0, 0.0])
+DISTORTION = np.array([0.001, 0.01, 0.0, 0.0])
 
 # Load and preprocess input picture
 img = np.random.random(size=[H, W, 3])
@@ -53,24 +53,59 @@ model.requires_grad_ = False
 model.to(DEVICE)
 model.eval()
 
-out_video = cv2.VideoWriter(SAVE_PATH, cv2.VideoWriter_fourcc('M','J','P','G'), FPS, (W, H))
+def convert_relu_to_leaky(model):
+    for child_name, child in model.named_children():
+        if isinstance(child, nn.ReLU):
+            setattr(model, child_name, nn.LeakyReLU(0.05))
+            print('relu')
+        else:
+            convert_relu_to_leaky(child)
+
+convert_relu_to_leaky(model)
+
+out_video = cv2.VideoWriter(SAVE_PATH, cv2.VideoWriter_fourcc(*'MP4V'), FPS, (W, H))
+
+def rotate_image(image, angle):
+  image_center = tuple(np.array(image.shape[1::-1]) / 2)
+  rot_mat = cv2.getRotationMatrix2D(image_center, angle, 1.0)
+  result = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR)
+  return result
 
 running_average = None
 grad_accum = None
 epoch = 0
 
+neuron_1 = neuron_2 = neuron_3 = neuron_4 = None
+
 while True:
-    img_small = cv2.resize(img, (500, 350))
+    img_small = cv2.resize(img, (768, 432))
     img_small = torch.tensor(img_small.transpose(2, 0, 1)[None], dtype=torch.float32, device=DEVICE, requires_grad=True)
 
     # Make forward pass
-    out = model(img_small)
+    delta = int(0.05 * img_small.shape[3])
+    lower_w = img_small.shape[3] // 2 - delta
+    upper_w = img_small.shape[3] // 2 + delta
+    lower_h = img_small.shape[2] // 2 - delta
+    upper_h = img_small.shape[2] // 2 + delta
+    img_two = torch.cat([
+        img_small[:, :, :upper_h, :upper_w], # top left
+        img_small[:, :, :upper_h, lower_w:], # top right
+        img_small[:, :, lower_h:, :upper_w], # bottom left
+        img_small[:, :, lower_h:, lower_w:], # bottom right
+    ], 0)
+    out = model(img_two)
 
     # Compute loss
-    if epoch % (FPS * 15) == 0:
-        neuron_1 = np.random.randint(out.shape[1])
-        neuron_2 = np.random.randint(out.shape[1])
-    loss = torch.mean(out[0, neuron_1]) + torch.mean(out[0, neuron_2])
+    mod = FPS * CHANGING_PERIOD
+    if epoch % mod == 0:
+        neuron_1 = np.random.choice(list(labels.keys()))
+    if (epoch - mod // 4) % mod == 0 or neuron_2 is None:
+        neuron_2 = np.random.choice(list(labels.keys()))
+    if (epoch - 2 * mod // 4) % mod == 0 or neuron_3 is None:
+        neuron_3 = np.random.choice(list(labels.keys()))
+    if (epoch - 3 * mod // 4) % mod == 0 or neuron_4 is None:
+        neuron_4 = np.random.choice(list(labels.keys()))
+    loss = torch.mean(out[0, neuron_1]) + torch.mean(out[1, neuron_2]) + torch.mean(out[2, neuron_3]) + torch.mean(out[3, neuron_4])
 
     # Compute gradients
     loss.backward()
@@ -78,12 +113,12 @@ while True:
     img = torch.tensor(img.transpose(2, 0, 1)[None], dtype=torch.float32)
 
     # Normalize gradients
-    grad_avg = torch.sqrt((grad**2).mean()).cpu().numpy()
+    grad_norm = torch.sqrt((grad**2).mean(1, keepdim=True)).cpu().numpy() + 1e-6
+    # grad_norm = torch.abs(grad).mean().cpu().numpy()
     if running_average is None:
-        running_average = grad_avg
-    running_average = running_average * 0.99 + grad_avg * 0.01
+        running_average = grad_norm
+    running_average = running_average * 0.99 + grad_norm * 0.01
     grad = grad / running_average
-    grad = F.interpolate(grad, size=(H, W), mode='bicubic', align_corners=True)
     grad = grad.clip(-1, 1)
 
     # To numpy
@@ -91,16 +126,19 @@ while True:
     grad = grad[0].numpy().transpose(1, 2, 0)
 
     # Distortion
-    CAM_MATRIX[0,2] = W / 2 + np.random.normal() * 10
-    CAM_MATRIX[1,2] = H / 2 + np.random.normal() * 10
+    CAM_MATRIX[0,2] = CAM_MATRIX[0,2] * 0.99 + np.random.normal(W / 2, 100) * 0.01
+    CAM_MATRIX[1,2] = CAM_MATRIX[1,2] * 0.99 + np.random.normal(H / 2, 100) * 0.01
     newcameramtx = CAM_MATRIX.copy()
     newcameramtx[:2,:2] *= 1.002
     img = cv2.undistort(img, CAM_MATRIX, DISTORTION, None, newcameramtx)
-    
+    img = rotate_image(rotate_image(img, 0.02), -0.02)
+
     # Accumulate gradients
+    grad = cv2.resize(grad, (W, H), interpolation=cv2.INTER_LANCZOS4)
     if grad_accum is None:
         grad_accum = grad
-    grad_accum = 0.1 * grad + 0.9 * cv2.undistort(grad_accum, CAM_MATRIX, DISTORTION, None, newcameramtx)
+    grad_accum = 0.05 * grad + 0.95 * grad_accum
+    grad_accum = cv2.undistort(grad_accum, CAM_MATRIX, DISTORTION, None, newcameramtx)
 
     # Gradient ascent step
     img = img + grad_accum * LR
@@ -116,14 +154,23 @@ while True:
     # Draw text
     img_show = Image.fromarray((img * 255).astype('uint8'))
     image_editable = ImageDraw.Draw(img_show)
-    text_1 = f'{labels[neuron_1].split(",")[0]}    '.upper()
-    text_2 = f'&    {labels[neuron_2].split(",")[0]}'.upper()
-    text = text_1 + text_2
-    w, h = image_editable.textsize(text_1, font=font)
-    w = w + image_editable.textsize('&', font=font)[0] / 2
-    text_x = max(W / 2 - w, 0)
+    # Upper
+    text_1 = f'{labels[neuron_1].split(",")[0]}'.upper()
+    text_2 = f'{labels[neuron_2].split(",")[0]}'.upper()
+    w, h = image_editable.textsize(text_2, font=font)
+    text_x = max(W - w, 0)
+    text_y = 1
+    image_editable.text((1, text_y), text_1, (237, 230, 211), font=font)
+    image_editable.text((text_x, text_y), text_2, (237, 230, 211), font=font)
+    # Lower
+    text_1 = f'{labels[neuron_3].split(",")[0]}'.upper()
+    text_2 = f'{labels[neuron_4].split(",")[0]}'.upper()
+    w, h = image_editable.textsize(text_2, font=font)
+    text_x = max(W - w, 0)
     text_y = H - FONT_SIZE - 1
-    image_editable.text((text_x, text_y), text, (237, 230, 211), font=font)
+    image_editable.text((1, text_y), text_1, (237, 230, 211), font=font)
+    image_editable.text((text_x, text_y), text_2, (237, 230, 211), font=font)
+    # Make text faded
     img_show = np.array(img_show) / 255
     img_show = img_show * 0.8 + img * 0.2
 
